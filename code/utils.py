@@ -1,15 +1,15 @@
-import pickle
 import numpy as np
 from math import sqrt
 from scipy import stats
 from sklearn import metrics
-from sklearn.metrics import roc_auc_score, recall_score, precision_score, accuracy_score, precision_recall_curve
+from sklearn.metrics import roc_auc_score, accuracy_score, precision_recall_curve
 import argparse
 import torch
 from torch.autograd import Variable
 
 args = argparse.ArgumentParser(description='Argparse for compound-protein interactions prediction')
-args.add_argument('-mode', default='gpu', help='gpu/ cpu')
+args.add_argument('-mode', default='gpu', help='gpu/cpu')
+args.add_argument('-cuda', default='0', help='visible cuda devices')
 args.add_argument('-lr', type=float, default=0.001, help='init learning rate')
 args.add_argument('-step_size', type=int, default=15, help='step size of lr_scheduler')
 args.add_argument('-gamma', type=float, default=0.5, help='lr weight decay rate')
@@ -79,27 +79,6 @@ def batch2tensor(batch_data, device):
     return atoms_pad, atoms_mask, adjacencies_pad, fps, amino_pad, amino_mask, label
 
 
-# def batch2tensor(batch_data, device):
-#     atoms_pad, atoms_mask = batch_pad(batch_data[0])
-#     adjacencies_pad, _ = batch_pad(batch_data[1])
-#     fps = fps2number(batch_data[2])
-#     amino_pad, amino_mask = batch_pad(batch_data[3])
-#     go_pad, go_mask = batch_pad(batch_data[4])
-#
-#     atoms_pad = Variable(torch.LongTensor(atoms_pad)).to(device)
-#     atoms_mask = Variable(torch.FloatTensor(atoms_mask)).to(device)
-#     adjacencies_pad = Variable(torch.LongTensor(adjacencies_pad)).to(device)
-#     fps = Variable(torch.FloatTensor(fps)).to(device)
-#     amino_pad = Variable(torch.LongTensor(amino_pad)).to(device)
-#     amino_mask = Variable(torch.FloatTensor(amino_mask)).to(device)
-#     go_pad = Variable(torch.LongTensor(go_pad)).to(device)
-#     go_mask = Variable(torch.FloatTensor(go_mask)).to(device)
-#
-#     label = torch.FloatTensor(batch_data[5]).to(device)
-#
-#     return atoms_pad, atoms_mask, adjacencies_pad, fps, amino_pad, amino_mask, go_pad, go_mask, label
-
-
 def load_data(datadir, target_type):
     if target_type:
         dir_input = datadir + '/' + target_type + '/'
@@ -113,20 +92,6 @@ def load_data(datadir, target_type):
     data_pack = [compounds, adjacencies, fingerprint, proteins, interactions]
     return data_pack
 
-# def load_data(datadir, target_type):
-#     if target_type:
-#         dir_input = datadir + '/' + target_type + '/'
-#     else:
-#         dir_input = datadir + '/'
-#     compounds = np.load(dir_input + 'compounds.npy', allow_pickle=True)
-#     adjacencies = np.load(dir_input + 'adjacencies.npy', allow_pickle=True)
-#     fingerprint = np.load(dir_input + 'fingerprint.npy', allow_pickle=True)
-#     proteins = np.load(dir_input + 'proteins.npy', allow_pickle=True)
-#     gos = np.load(dir_input + 'gos.npy', allow_pickle=True)
-#     interactions = np.load(dir_input + 'interactions.npy', allow_pickle=True)
-#     data_pack = [compounds, adjacencies, fingerprint, proteins, gos, interactions]
-#     return data_pack
-
 
 def split_data(train_data, ratio=0.1):
     idx = np.arange(len(train_data[0]))
@@ -138,42 +103,6 @@ def split_data(train_data, ratio=0.1):
     return data_train, data_dev
 
 
-def load_blosum62():
-    blosum_dict = {}
-    f = open('../datasets/blosum62.txt')
-    lines = f.readlines()
-    f.close()
-    skip = 1
-    for i in lines:
-        if skip == 1:
-            skip = 0
-            continue
-        parsed = i.strip('\n').split()
-        blosum_dict[parsed[0]] = np.array(parsed[1:]).astype(float)
-    return blosum_dict
-
-
-def init_embed(dir_input):
-    atom_dict = pickle.load(open(dir_input + 'atom_dict', 'rb'))
-    amino_dict = pickle.load(open(dir_input + 'amino_dict', 'rb'))
-
-    init_atom = np.zeros((len(atom_dict), 82))
-    init_amino = np.zeros((len(amino_dict), 20))
-
-    for key, value in atom_dict.items():
-        init_atom[value] = np.array(list(map(int, key)))
-
-    blosum_dict = load_blosum62()
-    for key, value in amino_dict.items():
-        if key not in blosum_dict:
-            continue
-        init_amino[value] = blosum_dict[key]  # / float(np.sum(blosum_dict[key]))
-    init_atom = Variable(torch.cat((torch.zeros(1, 82), torch.FloatTensor(init_atom)), dim=0)).cuda()
-    init_amino = Variable(torch.cat((torch.zeros(1, 20), torch.FloatTensor(init_amino)), dim=0)).cuda()
-
-    return init_atom, init_amino
-
-
 def regression_scores(label, pred):
     label = label.reshape(-1)
     pred = pred.reshape(-1)
@@ -181,16 +110,6 @@ def regression_scores(label, pred):
     pearson = np.corrcoef(label, pred)[0, 1]
     spearman = stats.spearmanr(label, pred)[0]
     return round(rmse, 6), round(pearson, 6), round(spearman, 6)
-
-
-# def classification_scores(label, pred_score, pred_label):
-#     label = label.reshape(-1)
-#     pred_score = pred_score.reshape(-1)
-#     pred_label = pred_label.reshape(-1)
-#     auc = roc_auc_score(label, pred_score)
-#     recall = recall_score(label, pred_label)
-#     precision = precision_score(label, pred_label)
-#     return round(auc, 6), round(recall, 6), round(precision, 6)
 
 
 def classification_scores(label, pred_score, pred_label):

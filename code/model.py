@@ -1,15 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import sys
-import pickle
-import math
-import numpy as np
-import torch.optim as optim
-from utils import params, batch2tensor, regression_scores, init_embed
-from sklearn.model_selection import KFold
-import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
 
 class GATLayer(nn.Module):
@@ -35,7 +26,7 @@ class GATLayer(nn.Module):
         zero_vec = -9e15 * torch.ones_like(e)
         attention = torch.where(adj > 0, e, zero_vec)
         attention = F.softmax(attention, dim=2)
-        attention = F.dropout(attention, self.dropout, training=self.training)
+        # attention = F.dropout(attention, self.dropout, training=self.training)
         h_prime = torch.bmm(attention, Wh)
 
         return F.elu(h_prime) if self.concat else h_prime
@@ -78,20 +69,38 @@ class BiDACPI(nn.Module):
                                                     stride=1, padding=window) for _ in range(layer_cnn)])
         self.W_prot = nn.Linear(prot_dim, latent_dim)
 
-        self.W_attention = nn.Linear(latent_dim, latent_dim)
-        self.att_atoms2prot = nn.Linear(2 * latent_dim, 1)
-        self.att_amino2comp = nn.Linear(2 * latent_dim, 1)
-        self.W_out = nn.ModuleList([nn.Linear(2 * latent_dim, 2 * latent_dim) for _ in range(layer_out)])
+        self.fp0 = nn.Parameter(torch.empty(size=(1024, latent_dim)))
+        nn.init.xavier_uniform_(self.fp0, gain=1.414)
+        self.fp1 = nn.Parameter(torch.empty(size=(latent_dim, latent_dim)))
+        nn.init.xavier_uniform_(self.fp1, gain=1.414)
 
-        if task == 'interaction':
-            self.predict = nn.Linear(2 * latent_dim, 2)
-        elif task == 'affinity':
-            self.predict = nn.Linear(2 * latent_dim, 1)
+        self.bidat_num = 4
+
+        self.U = nn.ParameterList([nn.Parameter(torch.empty(size=(latent_dim, latent_dim))) for _ in range(self.bidat_num)])
+        for i in range(self.bidat_num):
+            nn.init.xavier_uniform_(self.U[i], gain=1.414)
+
+        self.transform_c2p = nn.ModuleList([nn.Linear(latent_dim, latent_dim) for _ in range(self.bidat_num)])
+        self.transform_p2c = nn.ModuleList([nn.Linear(latent_dim, latent_dim) for _ in range(self.bidat_num)])
+
+        self.bihidden_c = nn.ModuleList([nn.Linear(latent_dim, latent_dim) for _ in range(self.bidat_num)])
+        self.bihidden_p = nn.ModuleList([nn.Linear(latent_dim, latent_dim) for _ in range(self.bidat_num)])
+        self.biatt_c = nn.ModuleList([nn.Linear(latent_dim * 2, 1) for _ in range(self.bidat_num)])
+        self.biatt_p = nn.ModuleList([nn.Linear(latent_dim * 2, 1) for _ in range(self.bidat_num)])
+
+        self.comb_c = nn.Linear(latent_dim * self.bidat_num, latent_dim)
+        self.comb_p = nn.Linear(latent_dim * self.bidat_num, latent_dim)
+
+        if task == 'affinity':
+            self.output = nn.Linear(latent_dim * latent_dim * 2, 1)
+        elif task == 'interaction':
+            self.output = nn.Linear(latent_dim * latent_dim * 2, 2)
+        else:
+            print("Please choose a correct mode!!!")
 
     def comp_gat(self, atoms, atoms_mask, adj):
         atoms_vector = self.embedding_layer_atom(atoms)
         atoms_multi_head = torch.cat([gat(atoms_vector, adj) for gat in self.gat_layers], dim=2)
-        atoms_multi_head = F.dropout(atoms_multi_head, self.dropout, training=self.training)
         atoms_vector = F.elu(self.gat_out(atoms_multi_head, adj))
         atoms_vector = F.leaky_relu(self.W_comp(atoms_vector), self.alpha)
         return atoms_vector
@@ -105,156 +114,49 @@ class BiDACPI(nn.Module):
         amino_vector = F.leaky_relu(self.W_prot(amino_vector), self.alpha)
         return amino_vector
 
-    def bidirectional_attention_prediction(self, atoms_vector, atoms_mask, amino_vector, amino_mask):
+    def mask_softmax(self, a, mask, dim=-1):
+        a_max = torch.max(a, dim, keepdim=True)[0]
+        a_exp = torch.exp(a - a_max)
+        a_exp = a_exp * mask
+        a_softmax = a_exp / (torch.sum(a_exp, dim, keepdim=True) + 1e-6)
+        return a_softmax
+
+    def bidirectional_attention_prediction(self, atoms_vector, atoms_mask, fps, amino_vector, amino_mask):
         b = atoms_vector.shape[0]
+        for i in range(self.bidat_num):
+            A = torch.tanh(torch.matmul(torch.matmul(atoms_vector, self.U[i]), amino_vector.transpose(1, 2)))
+            A = A * torch.matmul(atoms_mask.view(b, -1, 1), amino_mask.view(b, 1, -1))
 
-        atoms_vector = F.leaky_relu(self.W_attention(atoms_vector), self.alpha)
-        amino_vector = F.leaky_relu(self.W_attention(amino_vector), self.alpha)
+            atoms_trans = torch.matmul(A, torch.tanh(self.transform_p2c[i](amino_vector)))
+            amino_trans = torch.matmul(A.transpose(1, 2), torch.tanh(self.transform_c2p[i](atoms_vector)))
 
-        prot_vector = torch.sum(amino_vector * amino_mask.view(b, -1, 1), dim=1) / torch.sum(amino_mask, dim=1, keepdim=True)
-        prot_rep = torch.unsqueeze(prot_vector, 1).repeat_interleave(atoms_vector.shape[1], dim=1)
-        Wh_atoms2prot = torch.cat([atoms_vector, prot_rep], dim=2)
+            atoms_tmp = torch.cat([torch.tanh(self.bihidden_c[i](atoms_vector)), atoms_trans], dim=2)
+            amino_tmp = torch.cat([torch.tanh(self.bihidden_p[i](amino_vector)), amino_trans], dim=2)
 
-        atoms_attention = torch.tanh(self.att_atoms2prot(Wh_atoms2prot))
-        atoms_vector = atoms_vector * atoms_attention
-        comp_vector = torch.sum(atoms_vector * atoms_mask.view(b, -1, 1), dim=1) / torch.sum(atoms_mask, dim=1, keepdim=True)
+            atoms_att = self.mask_softmax(self.biatt_c[i](atoms_tmp).view(b, -1), atoms_mask.view(b, -1))
+            amino_att = self.mask_softmax(self.biatt_p[i](amino_tmp).view(b, -1), amino_mask.view(b, -1))
 
-        comp_rep = torch.unsqueeze(comp_vector, 1).repeat_interleave(amino_vector.shape[1], dim=1)
-        Wh_amino2comp = torch.cat([amino_vector, comp_rep], dim=2)
+            cf = torch.sum(atoms_vector * atoms_att.view(b, -1, 1), dim=1)
+            pf = torch.sum(amino_vector * amino_att.view(b, -1, 1), dim=1)
 
-        amino_attention = torch.tanh((self.att_amino2comp(Wh_amino2comp)))
-        amino_vector = amino_vector * amino_attention
-        prot_vector = torch.sum(amino_vector * amino_mask.view(b, -1, 1), dim=1) / torch.sum(amino_mask, dim=1, keepdim=True)
+            if i == 0:
+                cat_cf = cf
+                cat_pf = pf
+            else:
+                cat_cf = torch.cat([cat_cf.view(b, -1), cf.view(b, -1)], dim=1)
+                cat_pf = torch.cat([cat_pf.view(b, -1), pf.view(b, -1)], dim=1)
 
-        comp_prot_vector = torch.cat((comp_vector, prot_vector), dim=1)
-        for i in range(self.layer_out):
-            comp_prot_vector = F.leaky_relu(self.W_out[i](comp_prot_vector), self.alpha)
-        return self.predict(comp_prot_vector)
+        cf_final = torch.cat([self.comb_c(cat_cf).view(b, -1), fps.view(b, -1)], dim=1)
+        pf_final = self.comb_p(cat_pf)
+        cf_pf = F.leaky_relu(torch.matmul(cf_final.view(b, -1, 1), pf_final.view(b, 1, -1)).view(b, -1), 0.1)
+        return self.output(cf_pf)
 
-    def forward(self, atoms, atoms_mask, adjacency, amino, amino_mask):
-        import time
-        import numpy as np
-        st = time.time()
+    def forward(self, atoms, atoms_mask, adjacency, amino, amino_mask, fps):
         atoms_vector = self.comp_gat(atoms, atoms_mask, adjacency)
-        t1 = time.time() - st
         amino_vector = self.prot_cnn(amino, amino_mask)
-        t2 = time.time() - st - t1
-        prediction = self.bidirectional_attention_prediction(atoms_vector, atoms_mask, amino_vector, amino_mask)
-        t3 = time.time() - st - t1 - t2
-        t = np.array([t1, t2, t3])
-        # print(t / t.sum())
+
+        super_feature = F.leaky_relu(torch.matmul(fps, self.fp0), 0.1)
+        super_feature = F.leaky_relu(torch.matmul(super_feature, self.fp1), 0.1)
+
+        prediction = self.bidirectional_attention_prediction(atoms_vector, atoms_mask, super_feature, amino_vector, amino_mask)
         return prediction
-
-
-def print2file(buf, outFile, p=False):
-    if p:
-        print(buf)
-    outfd = open(outFile, 'a+')
-    outfd.write(buf + '\n')
-    outfd.close()
-
-
-def train_eval(model, task, train_data, valid_data, test_data, device, params):
-    criterion = F.mse_loss if task == 'affinity' else F.cross_entropy
-    optimizer = optim.Adam(model.parameters(), lr=params.lr, weight_decay=0, amsgrad=True)
-    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
-
-    idx = np.arange(len(train_data[0]))
-    batch_size = params.batch_size
-    # min_loss = 1000
-    for epoch in range(params.num_epochs):
-        print2file('epoch:{}'.format(epoch), 'bi-model.txt', True)
-        np.random.shuffle(idx)
-        for i in range(math.ceil(len(train_data[0]) / batch_size)):
-            batch_data = [train_data[di][idx[i * batch_size: (i + 1) * batch_size]] for di in range(4)]
-            atoms_pad, atoms_mask, adjacencies_pad, amino_pad, amino_mask, label = batch2tensor(batch_data, device)
-            pred = model(atoms_pad, atoms_mask, adjacencies_pad, amino_pad, amino_mask)
-            loss = criterion(pred.float(), label.float())
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
-            sys.stdout.write('\repoch:{}, batch:{}/{}, loss:{}'
-                             .format(epoch, i, math.ceil(len(train_data[0])/batch_size)-1, float(loss.data)))
-            sys.stdout.flush()
-
-        rmse_train, pearson_train, spearman_train = test(model, task, train_data, batch_size, device)
-        info = '\nTrain rmse:{}, pearson:{}, spearman:{}'.format(rmse_train, pearson_train, spearman_train)
-        print2file(info, 'bi-model.txt', True)
-
-        rmse_valid, pearson_valid, spearman_valid = test(model, task, valid_data, batch_size, device)
-        info = 'Valid rmse:{}, pearson:{}, spearman:{}'.format(rmse_valid, pearson_valid, spearman_valid)
-        print2file(info, 'bi-model.txt', True)
-
-        rmse_test, pearson_test, spearman_test = test(model, task, test_data, batch_size, device)
-        info = 'Test rmse:{}, pearson:{}, spearman:{}'.format(rmse_test, pearson_test, spearman_test)
-        print2file(info, 'bi-model.txt', True)
-
-        scheduler.step()
-
-
-def test(model, task, test_data, batch_size, device):
-    model.eval()
-    predictions = []
-    labels = []
-    for i in range(math.ceil(len(test_data[0]) / batch_size)):
-        batch_data = [test_data[di][i * batch_size: (i + 1) * batch_size] for di in range(4)]
-        atoms_pad, atoms_mask, adjacencies_pad, amino_pad, amino_mask, label = batch2tensor(batch_data, device)
-        with torch.no_grad():
-            pred = model(atoms_pad, atoms_mask, adjacencies_pad, amino_pad, amino_mask)
-        if task == 'affinity':
-            predictions += pred.cpu().detach().numpy().reshape(-1).tolist()
-            labels += label.cpu().numpy().reshape(-1).tolist()
-        else:
-            pass
-    predictions = np.array(predictions)
-    labels = np.array(labels)
-    if task == 'affinity':
-        rmse_value, pearson_value, spearman_value = regression_scores(labels, predictions)
-        return round(rmse_value, 6), round(pearson_value, 6), round(spearman_value, 6)
-    else:
-        pass
-
-
-if __name__ == '__main__':
-
-    # params.lr = 0.001
-    # params.step_size = 10
-    task = 'affinity'
-    DATASET = 'BindingDB'
-    measure = 'IC50'  # 'Ki', 'IC50', 'Kd', 'EC50'
-    target_class = 'test'  # 'GPCR', 'ER', 'channel', 'kinase'
-
-    dir_input = '../../CPI_prediction/dataset/BindingDB/input/radius2_ngram3/'
-
-    device = torch.device('cuda') if params.mode == 'gpu' and torch.cuda.is_available() else torch.device('cpu')
-    print('The code run on the', device)
-
-    print('Load data...')
-    compounds = np.load(dir_input + 'compounds.npy', allow_pickle=True)
-    adjacencies = np.load(dir_input + 'adjacencies.npy', allow_pickle=True)
-    # fingerprint = np.load(dir_input + 'fingerprint.npy', allow_pickle=True)
-    proteins = np.load(dir_input + 'proteins.npy', allow_pickle=True)
-    interactions = np.load(dir_input + 'interactions.npy', allow_pickle=True)
-    dataset = [compounds, adjacencies, proteins, interactions]
-
-    atom_dict = pickle.load(open(dir_input + 'fingerprint_dict.pickle', 'rb'))
-    amino_dict = pickle.load(open(dir_input + 'word_dict.pickle', 'rb'))
-    n_atom = len(atom_dict)
-    n_amino = len(amino_dict)
-
-    print('training...')
-    kf = KFold(5, shuffle=True)
-    for train_valid_idx, test_idx in kf.split(range(len(dataset[0]))):
-        model = BiDACPI(task, n_atom, n_amino, params)
-        model.to(device)
-
-        valid_idx = np.random.choice(train_valid_idx, int(len(train_valid_idx) * 0.125), replace=False)
-        train_idx = list(set(train_valid_idx) - set(valid_idx))
-        print('train num:', len(train_idx), 'valid num:', len(valid_idx), 'test num:', len(test_idx))
-
-        train_data = [dataset[i][train_idx] for i in range(4)]
-        valid_data = [dataset[i][valid_idx] for i in range(4)]
-        test_data = [dataset[i][test_idx] for i in range(4)]
-
-        train_eval(model, task, train_data, valid_data, test_data, device, params)
