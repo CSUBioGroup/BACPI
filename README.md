@@ -44,6 +44,7 @@ python main.py -task affinity -dataset Kd -lr 0.001 -batch_size 64 -num_epochs 1
 
 ### 4. Run on your datasets
 **NOTICE : Your dataset should be divided into train and test sets**
+
 Please prepare train.txt and test.txt file, and store them in the corresponding paths ('./data/interaction/dataset_name/' for CPI prediction and './data/affinity/dataset_name/' for affinity prediction). Each line in the data file contains the SMILES of the compound, the amino acid sequence of the protein, and the predicted label (interaction label: 0 or 1, affinity label: a continuous value), separated by commas(,). The format of the data file is as follows: 
  ```bash
 # interaction dataset
