@@ -5,10 +5,15 @@
 ## Requirements
 
 [numpy](https://numpy.org/)==1.19.1
+
 [pandas](https://pandas.pydata.org/)==1.0.5
+
 [rdkit](https://www.rdkit.org/)==2009.Q1-1
+
 [scikit_learn](https://scikit-learn.org/stable/)==1.0.2
+
 [scipy](https://scipy.org/)==1.5.0
+
 [torch](https://pytorch.org/)==1.6.0
 
 ## Example usage
