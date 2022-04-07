@@ -11,7 +11,7 @@ def extract_data(measure, file):
     data.to_csv(file + '.txt', index=None, header=None)
 
 
-def preprocess_affinity(dataset):
+def affinity_data_prepare(dataset):
     data_dir = '../data/affinity/' + dataset
     if not os.path.isdir(data_dir):
         tar = tarfile.open(data_dir + '.tar.xz')
@@ -24,20 +24,20 @@ def preprocess_affinity(dataset):
     extract_data(dataset, data_dir + '/test')
 
 
-def preprocess_interaction(dataset):
+def interaction_data_prepare(dataset):
     pass
 
 
-def preprocess(task, dataset):
+def training_data_prepare(task, dataset):
     if task == 'affinity':
-        preprocess_affinity(dataset)
+        affinity_data_prepare(dataset)
     else:
-        preprocess_interaction(dataset)
+        interaction_data_prepare(dataset)
 
 
 if __name__ == '__main__':
     for dataset in ['IC50', 'EC50', 'Ki', 'Kd']:
-        preprocess_affinity(dataset)
+        affinity_data_prepare(dataset)
 
     for dataset in ['human', 'celegans']:
-        preprocess_interaction(dataset)
+        interaction_data_prepare(dataset)

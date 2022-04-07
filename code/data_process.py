@@ -5,7 +5,7 @@ import pandas as pd
 from rdkit import Chem
 from rdkit.Chem import AllChem
 from collections import defaultdict
-from preprocessing import preprocess
+from data_prepare import training_data_prepare
 
 
 atom_dict = defaultdict(lambda: len(atom_dict))
@@ -91,7 +91,7 @@ def dump_dictionary(dictionary, filename):
         pickle.dump(dict(dictionary), f)
 
 
-def precessing(input_path, output_path, radius, ngram):
+def extract_input_data(input_path, output_path, radius, ngram):
     data = pd.read_csv(input_path + '.txt', header=None)
     compounds, adjacencies, fps, proteins, interactions = [], [], [], [], []
 
@@ -116,16 +116,16 @@ def precessing(input_path, output_path, radius, ngram):
     np.save(os.path.join(output_path, 'interactions'), interactions)
 
 
-def process(task, dataset):
+def training_data_process(task, dataset):
     radius, ngram = 2, 3
 
     if not os.path.isdir(os.path.join('../data', task, dataset)):
-        preprocess(task, dataset)
+        training_data_prepare(task, dataset)
 
     for name in ['train', 'test']:
         input_path = os.path.join('../data', task, dataset, name)
         output_path = os.path.join('../datasets', task, dataset, name)
-        precessing(input_path, output_path, radius, ngram)
+        extract_input_data(input_path, output_path, radius, ngram)
 
     dump_dictionary(fingerprint_dict, os.path.join('../datasets', task, dataset, 'atom_dict'))
     dump_dictionary(word_dict, os.path.join('../datasets', task, dataset, 'amino_dict'))

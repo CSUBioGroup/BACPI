@@ -1,14 +1,46 @@
+import os
+import sys
+import math
+import pickle
+import argparse
+import numpy as np
 import torch
 import torch.optim as optim
 import torch.nn.functional as F
-import sys
-import pickle
-import math
-import numpy as np
-from model import BiDACPI
+from model import BACPI
 from utils import *
-from processing import process
-import os
+from data_process import training_data_process
+
+
+args = argparse.ArgumentParser(description='Argparse for compound-protein interactions prediction')
+args.add_argument('-task', type=str, default='interaction', help='affinity/interaction')
+args.add_argument('-dataset', type=str, default='human', help='choose a dataset')
+args.add_argument('-mode', type=str, default='gpu', help='gpu/cpu')
+args.add_argument('-cuda', type=str, default='0', help='visible cuda devices')
+args.add_argument('-verbose', type=int, default=1, help='0: do not output log in stdout, 1: output log')
+
+# Hyper-parameter
+args.add_argument('-lr', type=float, default=0.0005, help='init learning rate')
+args.add_argument('-step_size', type=int, default=10, help='step size of lr_scheduler')
+args.add_argument('-gamma', type=float, default=0.5, help='lr weight decay rate')
+args.add_argument('-batch_size', type=int, default=16, help='batch size')
+args.add_argument('-num_epochs', type=int, default=20, help='number of epochs')
+
+# graph attention layer
+args.add_argument('-gat_dim', type=int, default=50, help='dimension of node feature in graph attention layer')
+args.add_argument('-num_head', type=int, default=3, help='number of graph attention layer head')
+args.add_argument('-dropout', type=float, default=0.1)
+args.add_argument('-alpha', type=float, default=0.1, help='LeakyReLU alpha')
+
+args.add_argument('-comp_dim', type=int, default=80, help='dimension of compound atoms feature')
+args.add_argument('-prot_dim', type=int, default=80, help='dimension of protein amino feature')
+args.add_argument('-latent_dim', type=int, default=80, help='dimension of compound and protein feature')
+
+args.add_argument('-window', type=int, default=5, help='window size of cnn model')
+args.add_argument('-layer_cnn', type=int, default=3, help='number of layer in cnn model')
+args.add_argument('-layer_out', type=int, default=3, help='number of output layer in prediction model')
+
+params, _ = args.parse_known_args()
 
 
 def train_eval(model, task, data_train, data_dev, data_test, device, params):
@@ -52,9 +84,9 @@ def train_eval(model, task, data_train, data_dev, data_test, device, params):
             loss.backward()
             optimizer.step()
 
-            sys.stdout.write('\repoch:{}, batch:{}/{}, loss:{}'.format(
-                epoch, i, math.ceil(len(data_train[0])/batch_size)-1, float(loss.data)))
-            sys.stdout.flush()
+            if params.verbose:
+                sys.stdout.write('\repoch:{}, batch:{}/{}, loss:{}'.format(epoch, i, math.ceil(len(data_train[0])/batch_size)-1, float(loss.data)))
+                sys.stdout.flush()
 
         if task == 'affinity':
             print(' ')
@@ -127,11 +159,14 @@ def test(model, task, data_test, batch_size, device):
 
 
 if __name__ == '__main__':
-    task = 'interaction'  # affinity / interaction
-    dataset = 'celegans'  # affinity ('IC50', 'Ki', 'Kd', 'EC50') / interaction (human, celegans)
+    
+    print(params)
+    task = params.task
+    dataset = params.dataset
+
     data_dir = '../datasets/' + task + '/' + dataset
     if not os.path.isdir(data_dir):
-        process(task, dataset)
+        training_data_process(task, dataset)
 
     if params.mode == 'gpu':
         os.environ["CUDA_VISIBLE_DEVICES"] = params.cuda
@@ -153,8 +188,7 @@ if __name__ == '__main__':
     amino_dict = pickle.load(open(data_dir + '/amino_dict', 'rb'))
 
     print('training...')
-    print(params)
-    model = BiDACPI(task, len(atom_dict), len(amino_dict), params)
+    model = BACPI(task, len(atom_dict), len(amino_dict), params)
     model.to(device)
     res = train_eval(model, task, train_data, dev_data, test_data, device, params)
 

@@ -1,36 +1,10 @@
 import numpy as np
+import torch
+from torch.autograd import Variable
 from math import sqrt
 from scipy import stats
 from sklearn import metrics
 from sklearn.metrics import roc_auc_score, accuracy_score, precision_recall_curve
-import argparse
-import torch
-from torch.autograd import Variable
-
-args = argparse.ArgumentParser(description='Argparse for compound-protein interactions prediction')
-args.add_argument('-mode', default='gpu', help='gpu/cpu')
-args.add_argument('-cuda', default='0', help='visible cuda devices')
-args.add_argument('-lr', type=float, default=0.001, help='init learning rate')
-args.add_argument('-step_size', type=int, default=15, help='step size of lr_scheduler')
-args.add_argument('-gamma', type=float, default=0.5, help='lr weight decay rate')
-args.add_argument('-batch_size', type=int, default=32, help='batch size')
-args.add_argument('-num_epochs', type=int, default=25, help='number of epochs')
-
-# graph attention layer
-args.add_argument('-gat_dim', type=int, default=50, help='dimension of node feature in graph attention layer')
-args.add_argument('-num_head', type=int, default=3, help='number of graph attention layer head')
-args.add_argument('-dropout', type=float, default=0.1)
-args.add_argument('-alpha', type=float, default=0.1, help='LeakyReLU alpha')
-
-args.add_argument('-comp_dim', type=int, default=80, help='dimension of compound atoms feature')
-args.add_argument('-prot_dim', type=int, default=80, help='dimension of protein amino feature')
-args.add_argument('-latent_dim', type=int, default=80, help='dimension of compound and protein feature')
-
-args.add_argument('-window', type=int, default=5, help='window size of cnn model')
-args.add_argument('-layer_cnn', type=int, default=4, help='number of layer in cnn model')
-args.add_argument('-layer_out', type=int, default=4, help='number of output layer in prediction model')
-
-params, _ = args.parse_known_args()
 
 
 def batch_pad(arr):
